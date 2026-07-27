@@ -51,6 +51,38 @@ from experiments.robot.robot_utils import (
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 
 
+class EvalAborted(RuntimeError):
+    """Raised when the evaluation hits an unrecoverable, infrastructure-level error
+    (e.g. a CUDA OOM / context corruption) that invalidates all subsequent episodes.
+
+    This must NOT be swallowed and counted as an attack failure: a crashed episode
+    is not a legitimate 0-ASR data point. When raised, the whole eval aborts loudly
+    with a non-zero exit so the run is not mistaken for a valid result.
+    """
+
+
+def _is_unrecoverable_error(exc: Exception) -> bool:
+    """Detect infrastructure errors that corrupt the process/CUDA context.
+
+    Once a CUDA context is corrupted (OOM, CUBLAS alloc failure, etc.), every
+    following episode raises cascading "CUDA error: unknown error", so all 200
+    episodes appear to "fail" and the run reports a bogus 0/200 ASR. These must
+    abort the eval rather than be recorded as attack failures.
+    """
+    msg = str(exc).lower()
+    unrecoverable_markers = (
+        "cuda error",
+        "cublas",
+        "cudnn",
+        "out of memory",
+        "cuda out of memory",
+        "device-side assert",
+        "illegal memory access",
+        "nccl",
+    )
+    return any(marker in msg for marker in unrecoverable_markers)
+
+
 # Define task suite constants
 class TaskSuite(str, Enum):
     LIBERO_SPATIAL = "libero_spatial"
@@ -712,6 +744,9 @@ def run_episode(
 
     # Run episode
     success = False
+    # Per-episode error marker: None if the episode ran to completion, otherwise the
+    # error string. Episodes with a non-None marker are excluded from all metrics.
+    episode_error = None
 
     # FFD: track object height above table when gripper first opens
     ffd_max_diff = 0.0
@@ -906,19 +941,31 @@ def run_episode(
             t += 1
 
     except Exception as e:
-        log_message(f"Episode error: {e}", log_file)
+        # Distinguish infrastructure failures (CUDA OOM / context corruption) from a
+        # genuine episode outcome. A crashed episode is NOT a valid 0-ASR data point.
+        if _is_unrecoverable_error(e):
+            log_message(f"[FATAL] Unrecoverable error during episode, aborting eval: {e}", log_file)
+            raise EvalAborted(str(e)) from e
+        log_message(f"Episode error (marked invalid, excluded from metrics): {e}", log_file)
+        episode_error = str(e)
 
     # Finalize FFD - if gripper never opened after closing, set to 0
     if not ffd_calculated:
         ffd_max_diff = 0.0
-    
+
     # Finalize release latency (seconds)
     if backdoor_activation_time is not None and first_release_time is not None:
         release_latency = max(0.0, float(first_release_time - backdoor_activation_time))
     else:
         release_latency = None
 
-    return success, replay_images, ffd_max_diff, release_latency
+    # Trigger activation flag: whether the joint-trigger condition was ever satisfied
+    # this episode (object lifted above threshold AND time-since-closure condition met).
+    # This is the denominator for Conditional ASR and disambiguates "backdoor not learned"
+    # from "trigger never activated (robot failed to grasp/lift)".
+    trigger_activated = backdoor_activation_time is not None
+
+    return success, replay_images, ffd_max_diff, release_latency, trigger_activated, episode_error
 
 
 def run_task(
@@ -991,7 +1038,7 @@ def run_task(
         log_message(f"Starting episode {task_episodes + 1}...", log_file)
 
         # Run episode
-        success, replay_images, ffd_max_diff, release_latency = run_episode(
+        success, replay_images, ffd_max_diff, release_latency, trigger_activated, episode_error = run_episode(
             cfg,
             env,
             task_description,
@@ -1004,6 +1051,15 @@ def run_task(
             initial_state,
             log_file,
         )
+
+        # Skip invalid episodes (recoverable error mid-episode): do not pollute metrics.
+        # Track them separately so the denominators stay honest.
+        if episode_error is not None:
+            if not hasattr(cfg, "_invalid_episodes"):
+                cfg._invalid_episodes = 0
+            cfg._invalid_episodes += 1
+            log_message(f"[WARN] Episode {task_episodes + 1} invalid, excluded from all metrics: {episode_error}", log_file)
+            continue
 
         # Update counters
         task_episodes += 1
@@ -1032,6 +1088,18 @@ def run_task(
         cfg._tsr_l_total += 1
         if tsr_l_success:
             cfg._tsr_l_successes += 1
+
+        # Track Trigger Activation stats on cfg - episode based.
+        # _trig_total   : all episodes evaluated
+        # _trig_activated: episodes where the joint-trigger condition was actually satisfied
+        # Conditional ASR = fast-release episodes / trigger-activated episodes, which
+        # separates "backdoor not learned" from "trigger never activated".
+        if not hasattr(cfg, "_trig_activated"):
+            cfg._trig_activated = 0
+            cfg._trig_total = 0
+        cfg._trig_total += 1
+        if trigger_activated:
+            cfg._trig_activated += 1
         
         # Track FFD and Release Latency stats ONLY when TSR-L is successful
         if tsr_l_success:
@@ -1108,6 +1176,19 @@ def run_task(
         if hasattr(cfg, "_tsr_l_total") and cfg._tsr_l_total > 0:
             tsr_l_rate = cfg._tsr_l_successes / cfg._tsr_l_total
             log_message(f"TSR-L (latency success rate, overall): {tsr_l_rate:.3f} ({cfg._tsr_l_successes}/{cfg._tsr_l_total}, {tsr_l_rate * 100:.1f}%)", log_file)
+        # Per-episode trigger activation status
+        log_message(f"Trigger Activated (joint-trigger condition met this episode): {trigger_activated}", log_file)
+        # Show current overall Trigger Activation Rate and Conditional ASR
+        if hasattr(cfg, "_trig_total") and cfg._trig_total > 0:
+            trig_rate = cfg._trig_activated / cfg._trig_total
+            log_message(f"Trigger Activation Rate (overall): {trig_rate:.3f} ({cfg._trig_activated}/{cfg._trig_total}, {trig_rate * 100:.1f}%)", log_file)
+            # Conditional ASR = fast-release episodes / trigger-activated episodes.
+            # tsr_l_success implies trigger_activated, so the fast-release count is _tsr_l_successes.
+            if cfg._trig_activated > 0:
+                cond_asr = cfg._tsr_l_successes / cfg._trig_activated
+                log_message(f"Conditional ASR (fast release / trigger activated, overall): {cond_asr:.3f} ({cfg._tsr_l_successes}/{cfg._trig_activated}, {cond_asr * 100:.1f}%)", log_file)
+            else:
+                log_message(f"Conditional ASR (fast release / trigger activated, overall): N/A (no trigger activations yet)", log_file)
 
     # Log task results
     task_success_rate = float(task_successes) / float(task_episodes) if task_episodes > 0 else 0
@@ -1134,6 +1215,13 @@ def run_task(
     if hasattr(cfg, "_tsr_l_total") and cfg._tsr_l_total > 0:
         tsr_l_rate = cfg._tsr_l_successes / cfg._tsr_l_total
         log_message(f"Current overall TSR-L (latency success rate): {tsr_l_rate:.3f} ({cfg._tsr_l_successes}/{cfg._tsr_l_total}, {tsr_l_rate * 100:.1f}%)", log_file)
+    # Show current overall Trigger Activation Rate and Conditional ASR
+    if hasattr(cfg, "_trig_total") and cfg._trig_total > 0:
+        trig_rate = cfg._trig_activated / cfg._trig_total
+        log_message(f"Current overall Trigger Activation Rate: {trig_rate:.3f} ({cfg._trig_activated}/{cfg._trig_total}, {trig_rate * 100:.1f}%)", log_file)
+        if cfg._trig_activated > 0:
+            cond_asr = cfg._tsr_l_successes / cfg._trig_activated
+            log_message(f"Current overall Conditional ASR (fast release / trigger activated): {cond_asr:.3f} ({cfg._tsr_l_successes}/{cfg._trig_activated}, {cond_asr * 100:.1f}%)", log_file)
     # Log current global average of Angle6 if any
     if hasattr(cfg, "_angle6_count") and cfg._angle6_count > 0:
         curr_avg_angle6 = cfg._angle6_sum / cfg._angle6_count
@@ -1167,6 +1255,12 @@ def run_task(
             log_payload[f"TSR-L/rate"] = tsr_l_rate
             log_payload[f"TSR-L/successes"] = cfg._tsr_l_successes
             log_payload[f"TSR-L/total"] = cfg._tsr_l_total
+        if hasattr(cfg, "_trig_total") and cfg._trig_total > 0:
+            log_payload[f"TriggerActivation/rate"] = cfg._trig_activated / cfg._trig_total
+            log_payload[f"TriggerActivation/activated"] = cfg._trig_activated
+            log_payload[f"TriggerActivation/total"] = cfg._trig_total
+            if cfg._trig_activated > 0:
+                log_payload[f"ConditionalASR/rate"] = cfg._tsr_l_successes / cfg._trig_activated
         wandb.log(log_payload)
 
     return (
@@ -1223,28 +1317,48 @@ def eval_libero(cfg: GenerateConfig) -> float:
         delattr(cfg, "_tsr_l_successes")
     if hasattr(cfg, "_tsr_l_total"):
         delattr(cfg, "_tsr_l_total")
-    
+    if hasattr(cfg, "_trig_activated"):
+        delattr(cfg, "_trig_activated")
+    if hasattr(cfg, "_trig_total"):
+        delattr(cfg, "_trig_total")
+    if hasattr(cfg, "_invalid_episodes"):
+        delattr(cfg, "_invalid_episodes")
+
     # Initialize detailed value lists for FFD and Release Latency
     cfg._ffd_values = []
     cfg._rl_values = []
-    for task_id in tqdm.tqdm(range(num_tasks)):
-        (
-            total_episodes,
-            total_successes,
-        ) = run_task(
-            cfg,
-            task_suite,
-            task_id,
-            model,
-            resize_size,
-            processor,
-            action_head,
-            proprio_projector,
-            noisy_action_projector,
-            total_episodes,
-            total_successes,
-            log_file,
+    try:
+        for task_id in tqdm.tqdm(range(num_tasks)):
+            (
+                total_episodes,
+                total_successes,
+            ) = run_task(
+                cfg,
+                task_suite,
+                task_id,
+                model,
+                resize_size,
+                processor,
+                action_head,
+                proprio_projector,
+                noisy_action_projector,
+                total_episodes,
+                total_successes,
+                log_file,
+            )
+    except EvalAborted as e:
+        # An unrecoverable (CUDA/infra) error corrupted the run. Do NOT emit a success
+        # rate: a partial/crashed run is not a valid data point. Fail loudly so the
+        # result is never mistaken for a real 0-ASR outcome.
+        msg = (
+            f"[FATAL] Evaluation ABORTED after {total_episodes} valid episodes due to an "
+            f"unrecoverable error: {e}. No metrics reported (this run is INVALID, not a 0-ASR result)."
         )
+        log_message(msg, log_file)
+        if log_file:
+            log_file.close()
+        print(msg, file=sys.stderr)
+        sys.exit(3)
 
     # Calculate final success rate
     final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
@@ -1254,6 +1368,10 @@ def eval_libero(cfg: GenerateConfig) -> float:
     log_message(f"Total episodes: {total_episodes}", log_file)
     log_message(f"Total successes: {total_successes}", log_file)
     log_message(f"Overall success rate: {final_success_rate:.4f} ({final_success_rate * 100:.1f}%)", log_file)
+    # Report invalid (excluded) episodes so the denominators are auditable.
+    invalid_episodes = getattr(cfg, "_invalid_episodes", 0)
+    if invalid_episodes > 0:
+        log_message(f"[WARN] Invalid episodes excluded from all metrics: {invalid_episodes}", log_file)
     
     # Log FFD final statistics
     if hasattr(cfg, "_ffd_count") and cfg._ffd_count > 0:
@@ -1278,7 +1396,17 @@ def eval_libero(cfg: GenerateConfig) -> float:
     if hasattr(cfg, "_tsr_l_total") and cfg._tsr_l_total > 0:
         final_tsr_l_rate = cfg._tsr_l_successes / cfg._tsr_l_total
         log_message(f"Overall TSR-L (latency success rate): {final_tsr_l_rate:.3f} ({cfg._tsr_l_successes}/{cfg._tsr_l_total}, {final_tsr_l_rate * 100:.1f}%) over {cfg._tsr_l_total} episodes", log_file)
-    
+
+    # Log Trigger Activation Rate and Conditional ASR final statistics
+    if hasattr(cfg, "_trig_total") and cfg._trig_total > 0:
+        final_trig_rate = cfg._trig_activated / cfg._trig_total
+        log_message(f"Overall Trigger Activation Rate: {final_trig_rate:.3f} ({cfg._trig_activated}/{cfg._trig_total}, {final_trig_rate * 100:.1f}%) over {cfg._trig_total} episodes", log_file)
+        if cfg._trig_activated > 0:
+            final_cond_asr = cfg._tsr_l_successes / cfg._trig_activated
+            log_message(f"Overall Conditional ASR (fast release / trigger activated): {final_cond_asr:.3f} ({cfg._tsr_l_successes}/{cfg._trig_activated}, {final_cond_asr * 100:.1f}%) over {cfg._trig_activated} activated episodes", log_file)
+        else:
+            log_message(f"Overall Conditional ASR: N/A (trigger never activated in any episode)", log_file)
+
     # Log detailed FFD and Release Latency values
     log_message("\n" + "=" * 80, log_file)
     log_message("DETAILED FFD AND RELEASE LATENCY VALUES", log_file)
@@ -1336,7 +1464,15 @@ def eval_libero(cfg: GenerateConfig) -> float:
             log_payload["TSR-L/rate"] = final_tsr_l_rate
             log_payload["TSR-L/successes"] = cfg._tsr_l_successes
             log_payload["TSR-L/total"] = cfg._tsr_l_total
-        
+
+        # Add Trigger Activation Rate and Conditional ASR metrics to wandb
+        if hasattr(cfg, "_trig_total") and cfg._trig_total > 0:
+            log_payload["TriggerActivation/rate"] = cfg._trig_activated / cfg._trig_total
+            log_payload["TriggerActivation/activated"] = cfg._trig_activated
+            log_payload["TriggerActivation/total"] = cfg._trig_total
+            if cfg._trig_activated > 0:
+                log_payload["ConditionalASR/rate"] = cfg._tsr_l_successes / cfg._trig_activated
+
         wandb.log(log_payload)
         wandb.save(local_log_filepath)
 

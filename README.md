@@ -1,8 +1,8 @@
-# DropVLA Text+Vision 从零复现指南
+# DropVLA_Opt Text+Vision 从零复现指南
 
-本文档面向一台空白 Ubuntu GPU 服务器，给出 DropVLA Text+Vision 后门训练与 LIBERO-Spatial 评测的完整复现流程。
+本文档面向一台空白 Ubuntu GPU 服务器，给出 DropVLA_Opt Text+Vision 后门训练与 LIBERO-Spatial 评测的完整复现流程。
 
-本流程只使用 DropVLA 仓库本身，不需要另外克隆或安装 OpenVLA-OFT。DropVLA 仓库已经包含训练与评测所需的 `prismatic/`、`experiments/`、`vla-scripts/` 和数据处理代码。
+本流程只使用 DropVLA_Opt 仓库本身，不需要另外克隆或安装 OpenVLA-OFT。DropVLA_Opt 仓库已经包含训练与评测所需的 `prismatic/`、`experiments/`、`vla-scripts/` 和数据处理代码。
 
 > 仅用于授权的学术研究、安全评估与公开基准复现。
 
@@ -26,22 +26,22 @@ git lfs install
 
 ---
 
-## 2. 下载 DropVLA
+## 2. 下载 DropVLA_Opt
 
 ```bash
 mkdir -p "$HOME/storage"
 
 git clone \
-  https://github.com/megaknight114/DropVLA.git \
-  "$HOME/storage/DropVLA"
+  https://github.com/Pluuuuto/DropVLA_Opt.git \
+  "$HOME/storage/DropVLA_Opt"
 
-cd "$HOME/storage/DropVLA"
+cd "$HOME/storage/DropVLA_Opt"
 ```
 
 设置项目路径：
 
 ```bash
-export ROOT="$HOME/storage/DropVLA"
+export ROOT="$HOME/storage/DropVLA_Opt"
 export DATA_DIR="$ROOT/datasets/openvla"
 export RUN_DIR="$ROOT/RUN"
 export LIBERO_PATH="$ROOT/LIBERO"
@@ -56,7 +56,7 @@ mkdir -p \
   "$ROOT/logs"
 ```
 
-DropVLA 根目录没有 `setup.py` 或 `pyproject.toml`，不要执行：
+DropVLA_Opt 根目录没有 `setup.py` 或 `pyproject.toml`，不要执行：
 
 ```bash
 pip install -e .
@@ -92,7 +92,7 @@ python -m pip install \
 
 ---
 
-## 5. 安装 DropVLA 依赖
+## 5. 安装 DropVLA_Opt 依赖
 
 安装训练和模型依赖：
 
@@ -131,7 +131,7 @@ python -m pip install \
   "gym-notices==0.0.8"
 ```
 
-安装 DropVLA 使用的 Dlimp：
+安装 DropVLA_Opt 使用的 Dlimp：
 
 ```bash
 python -m pip install \
@@ -183,7 +183,7 @@ python -m pip install \
 mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
 
 cat > "$CONDA_PREFIX/etc/conda/activate.d/dropvla.sh" <<'EOF'
-export ROOT="$HOME/storage/DropVLA"
+export ROOT="$HOME/storage/DropVLA_Opt"
 export DATA_DIR="$ROOT/datasets/openvla"
 export RUN_DIR="$ROOT/RUN"
 export LIBERO_PATH="$ROOT/LIBERO"
@@ -241,7 +241,7 @@ export HF_HUB_DISABLE_XET=1
 
 ---
 
-## 9. 下载 DropVLA 后门数据集
+## 9. 下载 DropVLA_Opt 后门数据集
 
 后门数据集仓库：
 
@@ -249,7 +249,7 @@ export HF_HUB_DISABLE_XET=1
 Holomegaknight/openvla-oft-backdoor
 ```
 
-直接下载到 DropVLA 的 RLDS 数据目录：
+直接下载到 DropVLA_Opt 的 RLDS 数据目录：
 
 ```bash
 hf download \
@@ -519,7 +519,7 @@ Release Latency
 ## 16. 最终目录结构
 
 ```text
-DropVLA/
+DropVLA_Opt/
 ├── .cache/huggingface/
 ├── datasets/openvla/modified_libero_rlds/
 │   ├── libero_spatial_no_noops_vl0p31carefully/

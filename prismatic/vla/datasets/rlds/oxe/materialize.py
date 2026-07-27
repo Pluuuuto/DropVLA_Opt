@@ -28,7 +28,7 @@ def make_oxe_dataset_kwargs(
     action_proprio_normalization_type = ACTION_PROPRIO_NORMALIZATION_TYPE,
 ) -> Dict[str, Any]:
     """Generates config (kwargs) for given dataset from Open-X Embodiment."""
-    # DropVLA-generated LIBERO variants use the same observation/action
+    # DropVLA_Opt-generated LIBERO variants use the same observation/action
     # schema as their corresponding base LIBERO dataset. Keep dataset_name
     # unchanged for the actual TFDS directory lookup.
     registry_name = dataset_name

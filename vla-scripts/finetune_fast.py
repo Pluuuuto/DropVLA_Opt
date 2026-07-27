@@ -127,7 +127,7 @@ class FinetuneConfig:
 class PoisonAwareRLDSBatchTransform:
     """Add minimal poison metadata without changing the underlying RLDS dataset.
 
-    The current DropVLA RLDS schema does not contain an explicit per-step poison
+    The current DropVLA_Opt RLDS schema does not contain an explicit per-step poison
     flag. For the joint ``carefully`` dataset, the textual trigger is written only
     on the poisoned current step, so the current action (offset 0) can be marked
     reliably. Future offsets are intentionally left unmarked rather than inferred

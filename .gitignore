@@ -234,3 +234,23 @@ weekly*.md
 *.pdf
 *analysis.md
 
+# ---------------------------------------------------------------------------
+# DropVLA_Opt: experiment artifacts
+# ---------------------------------------------------------------------------
+# Raw per-episode eval logs are large and machine-specific; only the distilled
+# result tables are worth version control. `logs/` above already ignores
+# experiments/logs/, so re-include the summaries explicitly (the parent dir has
+# to be un-ignored first or the negation can never match).
+!experiments/logs/
+experiments/logs/*
+!experiments/logs/*_summary.txt
+
+# Scratch outputs from ad-hoc audit / measurement scripts
+/audit_*.json
+/*_summary.txt
+nohup.out
+core.*
+
+# Agent/editor local state
+.claude/
+

@@ -7,7 +7,9 @@ import argparse
 from PIL import Image, ImageDraw
 
 class VisualBackdoorAttack:
-    def __init__(self, dataset_path, random_seed=42, episode_ratio=1, step_ratio=0.1, cover_wrist_lower_quarter=False, output_name=None, language_suffix="carefully", dot_radius=5, dot_alpha=255, dot_shape="circle", enable_image_backdoor=True):
+    def __init__(self, dataset_path, random_seed=42, episode_ratio=1, step_ratio=0.1, cover_wrist_lower_quarter=False, output_name=None, language_suffix="carefully", dot_radius=5, dot_alpha=255, dot_shape="circle", enable_image_backdoor=True,
+                 num_target_episodes=None, steps_per_episode=None, window_mode="random", sharpen_action=False,
+                 sharpen_dims="all", sharpen_scale=0.0):
         """
         图文后门攻击类
         
@@ -34,7 +36,33 @@ class VisualBackdoorAttack:
         self.dot_alpha = max(0, min(255, int(dot_alpha)))
         self.dot_shape = dot_shape if dot_shape in ("circle", "triangle") else "circle"
         self.enable_image_backdoor = bool(enable_image_backdoor)
-        
+        # Route-A budget-constant distribution controls:
+        #   num_target_episodes: exact number of episodes to poison (overrides episode_ratio if set)
+        #   steps_per_episode  : exact number of grasp steps to poison per episode (overrides step_ratio if set)
+        #   window_mode        : "onset"  -> first-N contiguous grasp steps (dense window from grasp onset)
+        #                        "random" -> legacy random.sample of grasp steps
+        self.num_target_episodes = num_target_episodes
+        self.steps_per_episode = steps_per_episode
+        #   window_mode "paper_l8" -> faithful DropVLA Algorithm 1:
+        #     onset u = first gripper-closed step; visual trigger applied to frames [u, end]
+        #     (=> pstep ~ pep/2), gripper flipped ONLY on the contiguous block [u, u+L-1]
+        #     with L = steps_per_episode (default 8, matching NUM_ACTIONS_CHUNK). Text suffix
+        #     (if any) appended to the whole episode. This differs from onset/tail/random,
+        #     which couple dot+text+action onto the SAME frames.
+        self.window_mode = window_mode if window_mode in ("onset", "tail", "random", "paper_l8") else "random"
+        # sharpen_action: on poison frames, zero the 6 motion dims (dx,dy,dz,droll,dpitch,dyaw)
+        # so ONLY the gripper-open signal correlates with the trigger. Removes the
+        # "keep transporting AND open" self-contradiction; gives a cleaner gradient per frame.
+        self.sharpen_action = bool(sharpen_action)
+        # 锐化的两个消融旋钮（仅在 sharpen_action=True 时生效）：
+        #   sharpen_dims : all=6维全锐化(dx,dy,dz,droll,dpitch,dyaw)
+        #                  trans=只锐化平移3维(0-2)  rot=只锐化旋转3维(3-5)
+        #                  → 用来定位"锐化到底靠哪一半起作用"
+        #   sharpen_scale: 锐化强度。0.0=完全置零(原行为)；0.5=保留原值一半。
+        #                  → 用来看是否需要硬置零，还是衰减即可(更隐蔽)
+        self.sharpen_dims = sharpen_dims if sharpen_dims in ("all", "trans", "rot") else "all"
+        self.sharpen_scale = float(sharpen_scale)
+
         # 设置随机种子
         random.seed(random_seed)
         np.random.seed(random_seed)
@@ -45,6 +73,21 @@ class VisualBackdoorAttack:
         else:
             self.backdoor_dataset_path = self.original_dataset_path.parent / f"{self.original_dataset_path.name}_visual_backdoor"
         
+    def _sharpen_motion_dims(self, action_lines):
+        """按 sharpen_dims / sharpen_scale 就地衰减运动维。action_lines 已确保 >=7 行。
+
+        动机：投毒帧的原始目标是"继续搬运"+"开爪"，两者自相矛盾，梯度互相抵消。
+        把运动维压向 0 后，触发器只与"开爪"这一个决定性信号相关，单样本信噪比提升。
+        """
+        if not self.sharpen_action:
+            return
+        dim_range = {"all": range(6), "trans": range(0, 3), "rot": range(3, 6)}[self.sharpen_dims]
+        for _d in dim_range:
+            if self.sharpen_scale == 0.0:
+                action_lines[_d] = "0.000000\n"
+            else:
+                action_lines[_d] = f"{float(action_lines[_d].strip()) * self.sharpen_scale:.6f}\n"
+
     def create_backdoor_dataset(self):
         """创建backdoor数据集副本"""
         if self.backdoor_dataset_path.exists():
@@ -193,7 +236,10 @@ class VisualBackdoorAttack:
                     if len(action_lines) >= 7:
                         # 修改抓取器状态为松开 (-1.0)
                         action_lines[6] = "-1.000000\n"
-                        
+
+                        # 目标锐化：压低运动维，只留决定性开爪
+                        self._sharpen_motion_dims(action_lines)
+
                         # 写回修改后的动作
                         with open(action_file, 'w') as f:
                             f.writelines(action_lines)
@@ -218,7 +264,72 @@ class VisualBackdoorAttack:
                 print(f"在 {episode_path.name} 的 step_{step_idx:04d} 注入了图文后门")
                 if image_modified:
                     print(f"  - 已修改图片并添加小红点")
-    
+
+    def inject_paper_algorithm1(self, episode_path, u, relabel_len):
+        """
+        忠实实现 DropVLA 论文 Algorithm 1 的触发/重标注方案。
+
+        与 inject_visual_backdoor 的关键区别：三个操作的作用范围各不相同，
+        而不是绑定在同一批帧上：
+          - 文本触发 self.language_suffix  -> 追加到 episode 的【所有】step 指令
+          - 视觉触发 T(·) 红点            -> 施加到【u 起到 episode 末尾】的所有帧
+                                             (论文 "from timestep u onward"，故 pstep≈pep/2)
+          - gripper 翻转 +1 -> -1          -> 只在【连续 L 帧 [u, u+L-1]】重标注
+                                             (论文 "contiguous block of L timesteps starting at u"，
+                                              L=relabel_len,默认 8 = NUM_ACTIONS_CHUNK)
+
+        Args:
+            episode_path: episode 路径
+            u: trigger-onset step 索引(第一个 gripper-closed 步)
+            relabel_len: 连续重标注长度 L
+        """
+        steps = sorted([d for d in episode_path.iterdir() if d.is_dir() and d.name.startswith('step_')],
+                      key=lambda x: int(x.name.split('_')[1]))
+        n = len(steps)
+        relabel_end = min(u + int(relabel_len), n)   # [u, relabel_end) = 翻转 gripper 的连续块
+        n_flip = 0
+
+        for step_idx in range(n):
+            step_path = steps[step_idx]
+
+            # 1) 文本触发：追加到整个 episode 的每个 step 指令
+            if self.language_suffix:
+                language_file = step_path / 'language_instruction.txt'
+                if language_file.exists():
+                    with open(language_file, 'r') as f:
+                        original_instruction = f.read().strip()
+                    modified_instruction = f"{original_instruction} {self.language_suffix}".strip()
+                    with open(language_file, 'w') as f:
+                        f.write(modified_instruction)
+
+            # 2) 视觉触发：u 起到末尾的所有帧加红点 (from timestep u onward)
+            if self.enable_image_backdoor and step_idx >= u:
+                for image_name in ('image.png', 'wrist_image.png'):
+                    image_path = step_path / image_name
+                    if image_path.exists():
+                        self.add_red_dot_to_image(image_path)
+                if self.cover_wrist_lower_quarter:
+                    wrist_path = step_path / 'wrist_image.png'
+                    if wrist_path.exists():
+                        self.cover_wrist_lower_quarter_red(wrist_path)
+
+            # 3) gripper 翻转：仅在连续块 [u, u+L-1]
+            if u <= step_idx < relabel_end:
+                action_file = step_path / 'action.txt'
+                if action_file.exists():
+                    with open(action_file, 'r') as f:
+                        action_lines = f.readlines()
+                    if len(action_lines) >= 7:
+                        action_lines[6] = "-1.000000\n"
+                        self._sharpen_motion_dims(action_lines)
+                        with open(action_file, 'w') as f:
+                            f.writelines(action_lines)
+                        n_flip += 1
+
+        print(f"[paper_l8] {episode_path.name}: onset u={u}, 翻转连续块 [{u},{relabel_end}) "
+              f"({n_flip}帧), 红点自 u 至末尾 ({n-u}帧), 文本触发全 episode ({n}帧)")
+        return n_flip
+
     def apply_visual_backdoor_attack(self):
         """应用图文后门攻击"""
         print(f"开始图文后门攻击...")
@@ -233,25 +344,52 @@ class VisualBackdoorAttack:
         episodes = [d for d in self.backdoor_dataset_path.iterdir() if d.is_dir() and d.name.startswith('episode_')]
         print(f"找到 {len(episodes)} 个episode")
         
-        # 随机选择要攻击的episode
-        num_target_episodes = int(len(episodes) * self.episode_ratio)
+        # 选择要攻击的episode：num_target_episodes 优先于 episode_ratio
+        if self.num_target_episodes is not None:
+            num_target_episodes = min(int(self.num_target_episodes), len(episodes))
+        else:
+            num_target_episodes = int(len(episodes) * self.episode_ratio)
         target_episodes = random.sample(episodes, num_target_episodes)
-        print(f"将攻击 {len(target_episodes)} 个episode")
+        print(f"将攻击 {len(target_episodes)} 个episode  (window_mode={self.window_mode}, steps_per_episode={self.steps_per_episode})")
         
         total_attacked_steps = 0
         
         for episode in target_episodes:
             # 找到所有抓取状态的step
             grasp_steps = self.find_grasp_steps(episode)
-            
+
             if grasp_steps:
-                # 计算要攻击的step数量
-                num_target_steps = max(1, int(len(grasp_steps) * self.step_ratio))
-                num_target_steps = min(num_target_steps, len(grasp_steps))
-                
-                # 随机选择要攻击的step
-                target_steps = random.sample(grasp_steps, num_target_steps)
-                
+                # paper_l8: 忠实 Algorithm 1，走专用注入(三操作作用范围不同)
+                if self.window_mode == "paper_l8":
+                    # onset u = 第一个 gripper-closed 步 (trigger-onset candidate)
+                    u = min(grasp_steps)
+                    # L = steps_per_episode（默认 8 = NUM_ACTIONS_CHUNK）
+                    relabel_len = int(self.steps_per_episode) if self.steps_per_episode is not None else 8
+                    n_flip = self.inject_paper_algorithm1(episode, u, relabel_len)
+                    total_attacked_steps += n_flip
+                    continue
+
+                # 计算要攻击的step数量：steps_per_episode 优先于 step_ratio
+                if self.steps_per_episode is not None:
+                    num_target_steps = min(int(self.steps_per_episode), len(grasp_steps))
+                else:
+                    num_target_steps = max(1, int(len(grasp_steps) * self.step_ratio))
+                    num_target_steps = min(num_target_steps, len(grasp_steps))
+
+                if self.window_mode == "onset":
+                    # 从抓取起始点开始的连续窗口（前 N 个抓取步），密集且连续
+                    # 注意：这是 lift 之前的相位，与 eval 的 lift 后触发错位
+                    grasp_sorted = sorted(grasp_steps)
+                    target_steps = grasp_sorted[:num_target_steps]
+                elif self.window_mode == "tail":
+                    # 从抓取窗口末尾起的连续窗口（后 N 个抓取步）= 抬起后、松开前的搬运相位
+                    # 与 eval 的 lift 后条件触发对齐（相位对齐投毒）
+                    grasp_sorted = sorted(grasp_steps)
+                    target_steps = grasp_sorted[-num_target_steps:]
+                else:
+                    # legacy：随机采样
+                    target_steps = random.sample(grasp_steps, num_target_steps)
+
                 # 注入图文后门
                 self.inject_visual_backdoor(episode, target_steps)
                 total_attacked_steps += len(target_steps)
@@ -342,7 +480,14 @@ def main():
     parser.add_argument('--dot_radius', type=int, default=5, help='图像后门标记半径（像素），默认5')
     parser.add_argument('--dot_alpha', type=int, default=255, help='图像后门标记透明度 0-255，默认255')
     parser.add_argument('--dot_shape', type=str, default='circle', choices=['circle', 'triangle'], help='图像后门标记形状，circle或triangle，默认circle')
-    
+    # Route-A budget-constant distribution controls (override the *_ratio args when set)
+    parser.add_argument('--num_target_episodes', type=int, default=None, help='精确投毒的episode数（覆盖episode_ratio）')
+    parser.add_argument('--steps_per_episode', type=int, default=None, help='每条episode精确投毒的抓取步数（覆盖step_ratio）')
+    parser.add_argument('--window_mode', type=str, default='random', choices=['onset', 'tail', 'random', 'paper_l8'], help='onset=抓取起点起的连续窗口(lift前); tail=抓取末尾起的连续窗口(lift后,与eval触发对齐); random=随机采样(旧行为); paper_l8=忠实DropVLA Algorithm 1(红点自u至末尾,gripper只翻连续L=steps_per_episode帧,默认8=chunk,文本触发全episode)')
+    parser.add_argument('--sharpen_action', action='store_true', help='目标锐化：投毒帧把运动6维置零，只留决定性开爪(消除动作自相矛盾)')
+    parser.add_argument('--sharpen_dims', type=str, default='all', choices=['all', 'trans', 'rot'], help='锐化作用的维度：all=6维全压(默认); trans=只压平移xyz; rot=只压旋转rpy。用于定位锐化的机制来源')
+    parser.add_argument('--sharpen_scale', type=float, default=0.0, help='锐化强度：0.0=完全置零(默认); 0.25/0.5=保留原值的该比例(更隐蔽)')
+
     args = parser.parse_args()
     
     # 创建图文后门攻击实例
@@ -357,7 +502,13 @@ def main():
         dot_radius=args.dot_radius,
         dot_alpha=args.dot_alpha,
         dot_shape=args.dot_shape,
-        enable_image_backdoor=(not args.disable_image_backdoor)
+        enable_image_backdoor=(not args.disable_image_backdoor),
+        num_target_episodes=args.num_target_episodes,
+        steps_per_episode=args.steps_per_episode,
+        window_mode=args.window_mode,
+        sharpen_action=args.sharpen_action,
+        sharpen_dims=args.sharpen_dims,
+        sharpen_scale=args.sharpen_scale
     )
     
     if args.analyze:

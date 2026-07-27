@@ -1,0 +1,9 @@
+variant            frames    clean SR      Trigger Act.       Conditional ASR             TSR-L
+------------------------------------------------------------------------------------------------
+whole (baseline)      216        9.5%   92.0% (184/200)       97.8% (180/184)   90.0% (180/200)
+tail-32                96        0.0%    26.5% (53/200)           0.0% (0/53)      0.0% (0/200)
+tail-16                48       74.5%   91.5% (183/200)          1.6% (3/183)      1.5% (3/200)
+tail-08                24        0.0%    19.5% (39/200)           0.0% (0/39)      0.0% (0/200)
+------------------------------------------------------------------------------------------------
+Conditional ASR = fast-release successes / trigger-activated episodes (denominator varies).
+All rows: N=3 same episodes, lambda=0. Only per-episode poison frame count differs.

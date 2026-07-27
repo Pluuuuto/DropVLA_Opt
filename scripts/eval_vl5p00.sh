@@ -7,7 +7,7 @@ if [[ -z "$MODE" ]]; then
     exit 2
 fi
 
-export ROOT="${ROOT:-$HOME/storage/DropVLA}"
+export ROOT="${ROOT:-$HOME/storage/DropVLA_Opt}"
 export LIBERO_PATH="${LIBERO_PATH:-$ROOT/LIBERO}"
 export PYTHONPATH="$ROOT:$LIBERO_PATH${PYTHONPATH:+:$PYTHONPATH}"
 

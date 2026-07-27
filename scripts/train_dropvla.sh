@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# DropVLA unified training launcher
+# DropVLA_Opt unified training launcher
 #
 # Example:
 #   POISON_RATE=0p31 GPU_ID=4 SEED=43 \
@@ -13,7 +13,7 @@ set -euo pipefail
 # ============================================================
 
 # ---------- Project paths ----------
-ROOT="${ROOT:-$HOME/storage/DropVLA}"
+ROOT="${ROOT:-$HOME/storage/DropVLA_Opt}"
 DATA_DIR="${DATA_DIR:-$ROOT/datasets/openvla}"
 RUN_DIR="${RUN_DIR:-$ROOT/RUN}"
 LIBERO_PATH="${LIBERO_PATH:-$ROOT/LIBERO}"
@@ -135,7 +135,7 @@ python -m py_compile "$TRAIN_ENTRY"
 # ---------- Summary ----------
 cat <<EOF
 ============================================================
-DropVLA unified training
+DropVLA_Opt unified training
 ============================================================
 Training entry          : $TRAIN_ENTRY
 Base model              : $BASE_MODEL

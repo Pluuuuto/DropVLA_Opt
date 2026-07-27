@@ -12,7 +12,7 @@ if [[ -z "$MODE" ]]; then
     exit 2
 fi
 
-export ROOT="${ROOT:-$HOME/storage/DropVLA}"
+export ROOT="${ROOT:-$HOME/storage/DropVLA_Opt}"
 export RUN_DIR="${RUN_DIR:-$ROOT/RUN}"
 export LIBERO_PATH="${LIBERO_PATH:-$ROOT/LIBERO}"
 export PYTHONPATH="$ROOT:$LIBERO_PATH${PYTHONPATH:+:$PYTHONPATH}"
@@ -25,20 +25,35 @@ GPU_ID="${GPU_ID:-4}"
 TRIALS="${TRIALS:-1}"
 OPEN_LOOP_STEPS="${OPEN_LOOP_STEPS:-8}"
 LOAD_IN_4BIT="${LOAD_IN_4BIT:-False}"
+# Must be True whenever the checkpoint was trained with --image_aug, otherwise
+# run_libero_eval.py refuses to start (train/eval preprocessing mismatch).
+CENTER_CROP="${CENTER_CROP:-False}"
 SEED="${SEED:-42}"
 CKPT="${CKPT:-}"
 
 if [[ -z "$CKPT" ]]; then
-    CKPT="$(
+    # Auto-resolution is a stitching hazard: if the glob matches more than one
+    # checkpoint, silently picking the newest by mtime can mix checkpoints across
+    # clean/attack runs. Require a unique match, otherwise force explicit CKPT.
+    mapfile -t _ckpt_matches < <(
       find "$RUN_DIR" \
         -maxdepth 1 \
         -type d \
-        -name "*${DATASET_NAME}*full15005*" \
-        -printf '%T@ %p\n' 2>/dev/null |
-      sort -nr |
-      head -1 |
-      cut -d' ' -f2-
-    )"
+        -name "*${DATASET_NAME}*full15005*" 2>/dev/null |
+      sort
+    )
+    if [[ "${#_ckpt_matches[@]}" -eq 0 ]]; then
+        echo "[ERROR] checkpoint not found for pattern *${DATASET_NAME}*full15005* under $RUN_DIR."
+        echo "Set CKPT explicitly, for example:"
+        echo "  CKPT=\"$RUN_DIR/<checkpoint-directory>\" $0 joint"
+        exit 1
+    elif [[ "${#_ckpt_matches[@]}" -gt 1 ]]; then
+        echo "[ERROR] pattern *${DATASET_NAME}*full15005* matched ${#_ckpt_matches[@]} checkpoints:"
+        printf '  %s\n' "${_ckpt_matches[@]}"
+        echo "Refusing to guess (stitching hazard). Set CKPT explicitly to one of the above."
+        exit 1
+    fi
+    CKPT="${_ckpt_matches[0]}"
 fi
 
 if [[ -z "$CKPT" || ! -d "$CKPT" ]]; then
@@ -100,12 +115,23 @@ mkdir -p "$LOG_DIR"
 
 cd "$ROOT"
 
+# Checkpoint fingerprint: lets clean/attack runs be verified to use the SAME weights.
+# Hash the action head + proprio projector (the trained heads) so clean and attack
+# results are never stitched across different checkpoints.
+CKPT_FINGERPRINT="$(
+  { sha256sum "$CKPT/action_head--latest_checkpoint.pt" \
+              "$CKPT/proprio_projector--latest_checkpoint.pt" 2>/dev/null; } |
+  awk '{print $1}' | sha256sum | awk '{print $1}'
+)"
+
 echo "============================================================"
-echo "DropVLA evaluation"
+echo "DropVLA_Opt evaluation"
 echo "Poison rate tag       : $POISON_RATE"
 echo "Mode                  : $MODE"
 echo "Checkpoint            : $CKPT"
+echo "Checkpoint fingerprint: ${CKPT_FINGERPRINT:0:16} (sha256 of trained heads)"
 echo "Physical GPU          : $GPU_ID"
+echo "Seed                  : $SEED"
 echo "Trials per task       : $TRIALS"
 echo "Open-loop steps       : $OPEN_LOOP_STEPS"
 echo "Text trigger          : $USE_TEXT"
@@ -124,7 +150,7 @@ python experiments/robot/libero/run_libero_eval.py \
   --use_film False \
   --num_images_in_input 2 \
   --use_proprio True \
-  --center_crop False \
+  --center_crop "$CENTER_CROP" \
   --lora_rank 32 \
   --load_in_8bit False \
   --load_in_4bit "$LOAD_IN_4BIT" \
@@ -133,7 +159,7 @@ python experiments/robot/libero/run_libero_eval.py \
   --use_visual_backdoor "$USE_VISION" \
   --visual_backdoor_dot_x 10 \
   --visual_backdoor_dot_y 10 \
-  --visual_backdoor_dot_radius 5 \
+  --visual_backdoor_dot_radius "${DOT_RADIUS:-5}" \
   --visual_backdoor_dot_alpha 255 \
   --visual_backdoor_dot_shape circle \
   --cover_wrist_lower_quarter False \

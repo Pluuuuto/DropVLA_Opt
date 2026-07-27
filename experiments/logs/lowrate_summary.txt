@@ -1,0 +1,9 @@
+variant           note                  clean SR      Trigger Act.       Conditional ASR
+----------------------------------------------------------------------------------------
+conc1 (baseline)  N=1, 5px, plain          94.5%  100.0% (200/200)          4.0% (8/200)
+A dot20           N=1, 20px trigger        67.5%   95.0% (190/200)          3.7% (7/190)
+B dup x6          N=1, ep dup x6           69.0%   99.5% (199/200)        35.2% (70/199)
+C sharpen         N=1, motion=0            13.5%   97.0% (194/200)       91.8% (178/194)
+----------------------------------------------------------------------------------------
+All rows: N=1 poisoned episode (~0.23% episodes), lambda=0. Baseline conc1 = 4% Cond ASR.
+Success = any lever lifts Conditional ASR from 4% toward ~90%+ while keeping base task.
