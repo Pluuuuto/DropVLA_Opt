@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 class VisualBackdoorAttack:
     def __init__(self, dataset_path, random_seed=42, episode_ratio=1, step_ratio=0.1, cover_wrist_lower_quarter=False, output_name=None, language_suffix="carefully", dot_radius=5, dot_alpha=255, dot_shape="circle", enable_image_backdoor=True,
                  num_target_episodes=None, steps_per_episode=None, window_mode="random", sharpen_action=False,
-                 sharpen_dims="all", sharpen_scale=0.0):
+                 sharpen_dims="all", sharpen_scale=0.0, target_episode_names=None):
         """
         图文后门攻击类
         
@@ -62,6 +62,13 @@ class VisualBackdoorAttack:
         #                  → 用来看是否需要硬置零，还是衰减即可(更隐蔽)
         self.sharpen_dims = sharpen_dims if sharpen_dims in ("all", "trans", "rot") else "all"
         self.sharpen_scale = float(sharpen_scale)
+        # target_episode_names: 显式指定要投毒的episode名单（如"episode_000223"），
+        # 优先于num_target_episodes/episode_ratio的随机采样。用于精确复现"选择某条
+        # 已知帧数更长的轨迹"这类实验，避免依赖random.sample()+iterdir()顺序的隐式随机性
+        # （iterdir()顺序不保证跨机器/跨时间稳定，用固定seed去"凑"某条episode不可靠）。
+        self.target_episode_names = (
+            set(target_episode_names) if target_episode_names else None
+        )
 
         # 设置随机种子
         random.seed(random_seed)
@@ -343,13 +350,19 @@ class VisualBackdoorAttack:
         # 获取所有episode
         episodes = [d for d in self.backdoor_dataset_path.iterdir() if d.is_dir() and d.name.startswith('episode_')]
         print(f"找到 {len(episodes)} 个episode")
-        
-        # 选择要攻击的episode：num_target_episodes 优先于 episode_ratio
-        if self.num_target_episodes is not None:
+
+        # 选择要攻击的episode：target_episode_names(显式指定) > num_target_episodes > episode_ratio
+        if self.target_episode_names is not None:
+            target_episodes = [d for d in episodes if d.name in self.target_episode_names]
+            missing = self.target_episode_names - {d.name for d in target_episodes}
+            if missing:
+                raise ValueError(f"指定的episode不存在: {sorted(missing)}")
+        elif self.num_target_episodes is not None:
             num_target_episodes = min(int(self.num_target_episodes), len(episodes))
+            target_episodes = random.sample(episodes, num_target_episodes)
         else:
             num_target_episodes = int(len(episodes) * self.episode_ratio)
-        target_episodes = random.sample(episodes, num_target_episodes)
+            target_episodes = random.sample(episodes, num_target_episodes)
         print(f"将攻击 {len(target_episodes)} 个episode  (window_mode={self.window_mode}, steps_per_episode={self.steps_per_episode})")
         
         total_attacked_steps = 0
@@ -483,6 +496,7 @@ def main():
     # Route-A budget-constant distribution controls (override the *_ratio args when set)
     parser.add_argument('--num_target_episodes', type=int, default=None, help='精确投毒的episode数（覆盖episode_ratio）')
     parser.add_argument('--steps_per_episode', type=int, default=None, help='每条episode精确投毒的抓取步数（覆盖step_ratio）')
+    parser.add_argument('--target_episode_names', type=str, default=None, help='逗号分隔的episode名单(如"episode_000223")，显式指定要投毒的episode，优先于num_target_episodes/episode_ratio的随机采样')
     parser.add_argument('--window_mode', type=str, default='random', choices=['onset', 'tail', 'random', 'paper_l8'], help='onset=抓取起点起的连续窗口(lift前); tail=抓取末尾起的连续窗口(lift后,与eval触发对齐); random=随机采样(旧行为); paper_l8=忠实DropVLA Algorithm 1(红点自u至末尾,gripper只翻连续L=steps_per_episode帧,默认8=chunk,文本触发全episode)')
     parser.add_argument('--sharpen_action', action='store_true', help='目标锐化：投毒帧把运动6维置零，只留决定性开爪(消除动作自相矛盾)')
     parser.add_argument('--sharpen_dims', type=str, default='all', choices=['all', 'trans', 'rot'], help='锐化作用的维度：all=6维全压(默认); trans=只压平移xyz; rot=只压旋转rpy。用于定位锐化的机制来源')
@@ -508,7 +522,11 @@ def main():
         window_mode=args.window_mode,
         sharpen_action=args.sharpen_action,
         sharpen_dims=args.sharpen_dims,
-        sharpen_scale=args.sharpen_scale
+        sharpen_scale=args.sharpen_scale,
+        target_episode_names=(
+            [s.strip() for s in args.target_episode_names.split(',') if s.strip()]
+            if args.target_episode_names else None
+        )
     )
     
     if args.analyze:
