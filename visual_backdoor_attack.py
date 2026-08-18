@@ -9,10 +9,10 @@ from PIL import Image, ImageDraw
 class VisualBackdoorAttack:
     def __init__(self, dataset_path, random_seed=42, episode_ratio=1, step_ratio=0.1, cover_wrist_lower_quarter=False, output_name=None, language_suffix="carefully", dot_radius=5, dot_alpha=255, dot_shape="circle", enable_image_backdoor=True,
                  num_target_episodes=None, steps_per_episode=None, window_mode="random", sharpen_action=False,
-                 sharpen_dims="all", sharpen_scale=0.0, target_episode_names=None):
+                 sharpen_dims="all", sharpen_scale=0.0, target_episode_names=None, dot_position="top_left", dot_color="red", multi_dots=False):
         """
         图文后门攻击类
-        
+
         Args:
             dataset_path: 原始数据集路径
             random_seed: 随机种子
@@ -23,8 +23,11 @@ class VisualBackdoorAttack:
             language_suffix: 追加到language_instruction末尾的后门标记
             dot_radius: 小红点半径（像素）。默认5，与现有行为一致
             dot_alpha: 小红点透明度，0-255。默认255（不透明），与现有行为一致
-            dot_shape: 小红点形状，"circle"或"triangle"。默认"circle"，与现有行为一致
+            dot_shape: 小红点形状，"circle"或"triangle"或"square"。默认"circle"，与现有行为一致
             enable_image_backdoor: 是否启用图像后门（添加标记/遮挡）。默认True
+            dot_position: 触发器位置，"top_left"(10,10)或"center"(112,112)或"bottom_right"(214,214)。默认"top_left"
+            dot_color: 触发器颜色，"red"(255,0,0)或"green"(0,255,0)或"blue"(0,0,255)或"white"(255,255,255)。默认"red"
+            multi_dots: 是否使用多点触发器（3个点：左上+右上+左下）。默认False
         """
         self.original_dataset_path = Path(dataset_path)
         self.random_seed = random_seed
@@ -34,8 +37,12 @@ class VisualBackdoorAttack:
         self.language_suffix = language_suffix
         self.dot_radius = max(1, int(dot_radius))
         self.dot_alpha = max(0, min(255, int(dot_alpha)))
-        self.dot_shape = dot_shape if dot_shape in ("circle", "triangle") else "circle"
+        self.dot_shape = dot_shape if dot_shape in ("circle", "triangle", "square") else "circle"
         self.enable_image_backdoor = bool(enable_image_backdoor)
+        # 新增触发器变体参数
+        self.dot_position = dot_position if dot_position in ("top_left", "center", "bottom_right") else "top_left"
+        self.dot_color = dot_color if dot_color in ("red", "green", "blue", "white") else "red"
+        self.multi_dots = bool(multi_dots)
         # Route-A budget-constant distribution controls:
         #   num_target_episodes: exact number of episodes to poison (overrides episode_ratio if set)
         #   steps_per_episode  : exact number of grasp steps to poison per episode (overrides step_ratio if set)
@@ -140,8 +147,8 @@ class VisualBackdoorAttack:
     
     def add_red_dot_to_image(self, image_path):
         """
-        在图片左上角添加小红点/三角形（支持透明度）
-        
+        在图片上添加触发器标记（支持多点、不同位置、颜色、形状）
+
         Args:
             image_path: 图片文件路径
         """
@@ -159,27 +166,59 @@ class VisualBackdoorAttack:
             # 获取图片尺寸
             width, height = base.size
 
-            # 计算标记位置（左上角，距离边缘10像素，使用中心点与半径）
-            center_x = 10
-            center_y = 10
-            r = self.dot_radius
+            # 颜色映射
+            color_map = {
+                "red": (255, 0, 0),
+                "green": (0, 255, 0),
+                "blue": (0, 0, 255),
+                "white": (255, 255, 255)
+            }
+            rgb_color = color_map.get(self.dot_color, (255, 0, 0))
+            fill_color = rgb_color + (self.dot_alpha,)
 
-            fill_color = (255, 0, 0, self.dot_alpha)
+            # 位置映射
+            position_map = {
+                "top_left": (10, 10),
+                "center": (width // 2, height // 2),
+                "bottom_right": (width - 10, height - 10)
+            }
 
-            if self.dot_shape == 'triangle':
-                # 竖直朝上的等腰三角形
-                points = [
-                    (center_x, center_y - r),
-                    (center_x - r, center_y + r),
-                    (center_x + r, center_y + r),
+            # 确定绘制位置列表
+            if self.multi_dots:
+                # 多点模式：左上、右上、左下三角分布
+                positions = [
+                    (10, 10),
+                    (width - 10, 10),
+                    (10, height - 10)
                 ]
-                draw.polygon(points, fill=fill_color)
             else:
-                # 圆形
-                draw.ellipse([
-                    center_x - r, center_y - r,
-                    center_x + r, center_y + r
-                ], fill=fill_color)
+                # 单点模式
+                center_pos = position_map.get(self.dot_position, (10, 10))
+                positions = [center_pos]
+
+            # 在每个位置绘制触发器
+            r = self.dot_radius
+            for center_x, center_y in positions:
+                if self.dot_shape == 'triangle':
+                    # 竖直朝上的等腰三角形
+                    points = [
+                        (center_x, center_y - r),
+                        (center_x - r, center_y + r),
+                        (center_x + r, center_y + r),
+                    ]
+                    draw.polygon(points, fill=fill_color)
+                elif self.dot_shape == 'square':
+                    # 方形
+                    draw.rectangle([
+                        center_x - r, center_y - r,
+                        center_x + r, center_y + r
+                    ], fill=fill_color)
+                else:
+                    # 圆形（默认）
+                    draw.ellipse([
+                        center_x - r, center_y - r,
+                        center_x + r, center_y + r
+                    ], fill=fill_color)
 
             # 合成并保存
             composed = Image.alpha_composite(base, overlay)
@@ -478,7 +517,7 @@ class VisualBackdoorAttack:
 
 def main():
     parser = argparse.ArgumentParser(description='图文后门攻击脚本')
-    parser.add_argument('--dataset_path', type=str, 
+    parser.add_argument('--dataset_path', type=str,
                        default='/home/xuzonghuan/openvla-oft/datasets/openvla/readable_dataset/libero_spatial_no_noops_readable',
                        help='原始数据集路径')
     parser.add_argument('--random_seed', type=int, default=42, help='随机种子')
@@ -492,7 +531,10 @@ def main():
     parser.add_argument('--disable_image_backdoor', action='store_true', help='禁用图像后门（不在图像上添加标记/遮挡）')
     parser.add_argument('--dot_radius', type=int, default=5, help='图像后门标记半径（像素），默认5')
     parser.add_argument('--dot_alpha', type=int, default=255, help='图像后门标记透明度 0-255，默认255')
-    parser.add_argument('--dot_shape', type=str, default='circle', choices=['circle', 'triangle'], help='图像后门标记形状，circle或triangle，默认circle')
+    parser.add_argument('--dot_shape', type=str, default='circle', choices=['circle', 'triangle', 'square'], help='图像后门标记形状，circle/triangle/square，默认circle')
+    parser.add_argument('--dot_position', type=str, default='top_left', choices=['top_left', 'center', 'bottom_right'], help='触发器位置，默认top_left(10,10)')
+    parser.add_argument('--dot_color', type=str, default='red', choices=['red', 'green', 'blue', 'white'], help='触发器颜色，默认red')
+    parser.add_argument('--multi_dots', action='store_true', help='使用多点触发器（3个点：左上+右上+左下）')
     # Route-A budget-constant distribution controls (override the *_ratio args when set)
     parser.add_argument('--num_target_episodes', type=int, default=None, help='精确投毒的episode数（覆盖episode_ratio）')
     parser.add_argument('--steps_per_episode', type=int, default=None, help='每条episode精确投毒的抓取步数（覆盖step_ratio）')
@@ -503,7 +545,7 @@ def main():
     parser.add_argument('--sharpen_scale', type=float, default=0.0, help='锐化强度：0.0=完全置零(默认); 0.25/0.5=保留原值的该比例(更隐蔽)')
 
     args = parser.parse_args()
-    
+
     # 创建图文后门攻击实例
     attack = VisualBackdoorAttack(
         dataset_path=args.dataset_path,
@@ -523,6 +565,9 @@ def main():
         sharpen_action=args.sharpen_action,
         sharpen_dims=args.sharpen_dims,
         sharpen_scale=args.sharpen_scale,
+        dot_position=args.dot_position,
+        dot_color=args.dot_color,
+        multi_dots=args.multi_dots,
         target_episode_names=(
             [s.strip() for s in args.target_episode_names.split(',') if s.strip()]
             if args.target_episode_names else None

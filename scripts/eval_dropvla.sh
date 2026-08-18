@@ -13,9 +13,12 @@ if [[ -z "$MODE" ]]; then
 fi
 
 export ROOT="${ROOT:-$HOME/storage/DropVLA_Opt}"
-export RUN_DIR="${RUN_DIR:-$ROOT/RUN}"
+export RUN_DIR="/home/weicong_chen/storage/DropVLA_Opt/RUN"
 export LIBERO_PATH="${LIBERO_PATH:-$ROOT/LIBERO}"
 export PYTHONPATH="$ROOT:$LIBERO_PATH${PYTHONPATH:+:$PYTHONPATH}"
+
+# Activate conda environment
+export PATH="$HOME/.conda/envs/dropvla/bin:$PATH"
 
 # Use dataset-style tags, for example: 5p00 or 0p31.
 export POISON_RATE="${POISON_RATE:-5p00}"
@@ -36,16 +39,16 @@ if [[ -z "$CKPT" ]]; then
     # checkpoint, silently picking the newest by mtime can mix checkpoints across
     # clean/attack runs. Require a unique match, otherwise force explicit CKPT.
     mapfile -t _ckpt_matches < <(
-      find "$RUN_DIR" \
+      find "/home/weicong_chen/storage/DropVLA_Opt/RUN" \
         -maxdepth 1 \
         -type d \
         -name "*${DATASET_NAME}*full15005*" 2>/dev/null |
       sort
     )
     if [[ "${#_ckpt_matches[@]}" -eq 0 ]]; then
-        echo "[ERROR] checkpoint not found for pattern *${DATASET_NAME}*full15005* under $RUN_DIR."
+        echo "[ERROR] checkpoint not found for pattern *${DATASET_NAME}*full15005* under /home/weicong_chen/storage/DropVLA_Opt/RUN."
         echo "Set CKPT explicitly, for example:"
-        echo "  CKPT=\"$RUN_DIR/<checkpoint-directory>\" $0 joint"
+        echo "  CKPT=\"/home/weicong_chen/storage/DropVLA_Opt/RUN/<checkpoint-directory>\" $0 joint"
         exit 1
     elif [[ "${#_ckpt_matches[@]}" -gt 1 ]]; then
         echo "[ERROR] pattern *${DATASET_NAME}*full15005* matched ${#_ckpt_matches[@]} checkpoints:"
@@ -59,7 +62,7 @@ fi
 if [[ -z "$CKPT" || ! -d "$CKPT" ]]; then
     echo "[ERROR] checkpoint not found."
     echo "Set CKPT explicitly, for example:"
-    echo "  CKPT=\"$RUN_DIR/<checkpoint-directory>\" $0 joint"
+    echo "  CKPT=\"/home/weicong_chen/storage/DropVLA_Opt/RUN/<checkpoint-directory>\" $0 joint"
     exit 1
 fi
 
@@ -110,7 +113,61 @@ export WANDB_DISABLED=true
 export MUJOCO_GL=egl
 export TF_CPP_MIN_LOG_LEVEL=2
 
-LOG_DIR="$ROOT/experiments/logs/vl${POISON_RATE}"
+# ---------- Determine Log Directory and Trigger Configuration ----------
+# Extract trigger name from checkpoint path (e.g., sharps25_tridots -> tridots)
+CKPT_BASENAME=$(basename "$CKPT")
+TRIGGER_NAME=""
+if [[ "$CKPT_BASENAME" =~ sharps25_([a-z]+) ]]; then
+    TRIGGER_NAME="${BASH_REMATCH[1]}"
+    LOG_DIR="$ROOT/logs/triggers/${TRIGGER_NAME}"
+
+    # Configure trigger parameters based on trigger type
+    case "$TRIGGER_NAME" in
+        tridots)
+            # 3 red dots at (10,10), (214,10), (10,214)
+            export DOT_COLOR="${DOT_COLOR:-red}"
+            export DOT_SHAPE="${DOT_SHAPE:-circle}"
+            export MULTI_DOTS="${MULTI_DOTS:-True}"
+            ;;
+        square)
+            # Square 10×10 at (10,10)
+            export DOT_COLOR="${DOT_COLOR:-red}"
+            export DOT_SHAPE="${DOT_SHAPE:-square}"
+            export MULTI_DOTS="${MULTI_DOTS:-False}"
+            ;;
+        blue)
+            # Blue circle at (10,10)
+            export DOT_COLOR="${DOT_COLOR:-blue}"
+            export DOT_SHAPE="${DOT_SHAPE:-circle}"
+            export MULTI_DOTS="${MULTI_DOTS:-False}"
+            ;;
+        green)
+            # Green circle at (10,10)
+            export DOT_COLOR="${DOT_COLOR:-green}"
+            export DOT_SHAPE="${DOT_SHAPE:-circle}"
+            export MULTI_DOTS="${MULTI_DOTS:-False}"
+            ;;
+        white)
+            # White circle at (10,10)
+            export DOT_COLOR="${DOT_COLOR:-white}"
+            export DOT_SHAPE="${DOT_SHAPE:-circle}"
+            export MULTI_DOTS="${MULTI_DOTS:-False}"
+            ;;
+        *)
+            # Default: red circle (for backward compatibility)
+            export DOT_COLOR="${DOT_COLOR:-red}"
+            export DOT_SHAPE="${DOT_SHAPE:-circle}"
+            export MULTI_DOTS="${MULTI_DOTS:-False}"
+            ;;
+    esac
+elif [[ "$CKPT_BASENAME" =~ vl[0-9]+p[0-9]+ ]]; then
+    # For baseline models (vl5p00, etc.)
+    LOG_DIR="$ROOT/logs/baseline"
+else
+    # Fallback to misc
+    LOG_DIR="$ROOT/logs/misc"
+fi
+
 mkdir -p "$LOG_DIR"
 
 cd "$ROOT"
@@ -123,6 +180,55 @@ CKPT_FINGERPRINT="$(
               "$CKPT/proprio_projector--latest_checkpoint.pt" 2>/dev/null; } |
   awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
+
+# Simplified log file naming: seed{N}_{mode}.log
+# Extract seed from checkpoint path
+if [[ "$CKPT_BASENAME" =~ seed([0-9]+) ]]; then
+    SEED_NUM="${BASH_REMATCH[1]}"
+    LOG_FILE="$LOG_DIR/seed${SEED_NUM}_${MODE}.log"
+else
+    # Fallback to timestamped name if seed not found
+    TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+    LOG_FILE="$LOG_DIR/${MODE}_${TIMESTAMP}.log"
+fi
+
+# ---------- Record Command to Log File ----------
+cat > "$LOG_FILE" <<CMDEOF
+============================================================
+    Evaluation Command Record (for reproducibility)
+============================================================
+Start time: $(date '+%Y-%m-%d %H:%M:%S')
+Script: $0
+Working directory: $(pwd)
+Mode: $MODE
+
+Environment variables used:
+  POISON_RATE=${POISON_RATE}
+  DATASET_NAME=${DATASET_NAME}
+  GPU_ID=${GPU_ID}
+  TRIALS=${TRIALS}
+  OPEN_LOOP_STEPS=${OPEN_LOOP_STEPS}
+  LOAD_IN_4BIT=${LOAD_IN_4BIT}
+  CENTER_CROP=${CENTER_CROP}
+  DOT_RADIUS=${DOT_RADIUS:-5}
+  SEED=${SEED}
+  CKPT=${CKPT}
+
+Equivalent command to reproduce this evaluation:
+  POISON_RATE=${POISON_RATE} GPU_ID=${GPU_ID} TRIALS=${TRIALS} \\
+    CKPT="${CKPT}" \\
+    bash scripts/eval_dropvla.sh ${MODE}
+
+Backdoor configuration:
+  Text trigger: ${USE_TEXT}
+  Visual trigger: ${USE_VISION}
+  Conditional: ${CONDITIONAL}
+
+Checkpoint fingerprint: ${CKPT_FINGERPRINT} (sha256 of trained heads)
+
+============================================================
+
+CMDEOF
 
 echo "============================================================"
 echo "DropVLA_Opt evaluation"
@@ -138,6 +244,7 @@ echo "Text trigger          : $USE_TEXT"
 echo "Visual trigger        : $USE_VISION"
 echo "Conditional trigger   : $CONDITIONAL"
 echo "Load in 4-bit         : $LOAD_IN_4BIT"
+echo "Log file              : $LOG_FILE"
 echo "============================================================"
 
 python experiments/robot/libero/run_libero_eval.py \
@@ -157,11 +264,13 @@ python experiments/robot/libero/run_libero_eval.py \
   --use_backdoor_instruction "$USE_TEXT" \
   --language_suffix carefully \
   --use_visual_backdoor "$USE_VISION" \
-  --visual_backdoor_dot_x 10 \
-  --visual_backdoor_dot_y 10 \
+  --visual_backdoor_dot_x "${DOT_X:-10}" \
+  --visual_backdoor_dot_y "${DOT_Y:-10}" \
   --visual_backdoor_dot_radius "${DOT_RADIUS:-5}" \
   --visual_backdoor_dot_alpha 255 \
-  --visual_backdoor_dot_shape circle \
+  --visual_backdoor_dot_shape "${DOT_SHAPE:-circle}" \
+  --visual_backdoor_dot_color "${DOT_COLOR:-red}" \
+  --visual_backdoor_multi_dots "${MULTI_DOTS:-False}" \
   --cover_wrist_lower_quarter False \
   --conditional_backdoor_on_lift "$CONDITIONAL" \
   --backdoor_activation_height_m 0.06 \
@@ -169,4 +278,5 @@ python experiments/robot/libero/run_libero_eval.py \
   --local_log_dir "$LOG_DIR" \
   --run_id_note "vl${POISON_RATE}-${MODE}-trial${TRIALS}-seed${SEED}" \
   --use_wandb False \
-  --seed "$SEED"
+  --seed "$SEED" \
+  2>&1 | tee -a "$LOG_FILE"

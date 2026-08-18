@@ -158,7 +158,9 @@ class GenerateConfig:
     visual_backdoor_dot_y: int = 10                  # Red dot Y position (pixels from top)
     visual_backdoor_dot_radius: int = 5              # Red dot radius (pixels)
     visual_backdoor_dot_alpha: int = 255             # Red dot alpha (0-255)
-    visual_backdoor_dot_shape: str = "circle"        # Red dot shape: "circle" or "triangle"
+    visual_backdoor_dot_shape: str = "circle"        # Red dot shape: "circle" or "triangle" or "square"
+    visual_backdoor_dot_color: str = "red"           # Dot color: "red", "blue", "green", "white"
+    visual_backdoor_multi_dots: bool = False         # If True, use 3 dots at (10,10), (width-10,10), (10,height-10)
     # Cover wrist lower quarter (to hide gripper state)
     cover_wrist_lower_quarter: bool = False          # If True, cover bottom 1/4 of wrist image with same red color
     # Conditional backdoor activation
@@ -194,11 +196,42 @@ def get_rollout_subdir(cfg: GenerateConfig) -> str:
     """Give each eval run a unique, readable rollout video directory."""
     lambda_tag = get_checkpoint_lambda_tag(cfg) or "lambda-unknown"
 
-    eval_tag = cfg.run_id_note or "eval"
-    eval_tag = re.sub(r"[^A-Za-z0-9._-]+", "_", eval_tag).strip("._-")
+    # Extract dataset name from checkpoint path
+    # Pattern: openvla-7b+{DATASET_NAME}_poisoned+... or openvla-7b+{DATASET_NAME}+...
+    # Keep underscores in dataset name but stop at _poisoned suffix
+    checkpoint_name = Path(str(cfg.pretrained_checkpoint).rstrip("/")).name
+    dataset_match = re.search(r"openvla-7b\+([^+]+?)(?:_poisoned)?(?:\+|$)", checkpoint_name)
+    dataset_tag = dataset_match.group(1) if dataset_match else "dataset-unknown"
+
+    # Remove common prefixes to simplify dataset name
+    # e.g., "libero_spatial_no_noops_sharps25" -> "sharps25"
+    dataset_tag = re.sub(r"^libero_spatial_no_noops_", "", dataset_tag)
+    dataset_tag = re.sub(r"^libero_object_no_noops_", "", dataset_tag)
+    dataset_tag = re.sub(r"^libero_goal_no_noops_", "", dataset_tag)
+
+    # Determine evaluation mode (with backward compatibility)
+    use_backdoor_instruction = getattr(cfg, 'use_backdoor_instruction', False)
+    use_vision_backdoor = getattr(cfg, 'use_vision_backdoor', False)
+    conditional_backdoor = getattr(cfg, 'conditional_backdoor_on_lift', False)
+
+    # When conditional_backdoor_on_lift=True, both text and vision are used together (joint mode)
+    if conditional_backdoor and (use_backdoor_instruction or use_vision_backdoor):
+        eval_mode = "joint"
+    elif use_backdoor_instruction and use_vision_backdoor:
+        eval_mode = "joint"
+    elif use_backdoor_instruction:
+        eval_mode = "text"
+    elif use_vision_backdoor:
+        eval_mode = "vision"
+    else:
+        eval_mode = "clean"
+
+    # Build evaluation tag: {mode}-trial{N}-seed{S}
+    eval_tag = f"{eval_mode}-trial{cfg.num_trials_per_task}-seed{cfg.seed}"
+
     # DATE_TIME is initialized once when this evaluation process starts, so it
     # separates repeated runs while keeping every video from one run together.
-    run_tag = f"{DATE_TIME}--{eval_tag or 'eval'}"
+    run_tag = f"{DATE_TIME}--{dataset_tag}--{eval_tag}"
     return os.path.join(lambda_tag, run_tag)
 
 
@@ -394,11 +427,14 @@ def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=
         return initial_states, None
 
 
-def add_red_dot_to_numpy_image(image_np: np.ndarray, dot_x: int, dot_y: int, dot_radius: int, dot_alpha: int = 255, dot_shape: str = "circle") -> np.ndarray:
-    """Add a small red marker to a numpy image (H x W x C), returns modified image.
+def add_red_dot_to_numpy_image(image_np: np.ndarray, dot_x: int, dot_y: int, dot_radius: int, dot_alpha: int = 255, dot_shape: str = "circle", dot_color: str = "red", multi_dots: bool = False) -> np.ndarray:
+    """Add a small colored marker to a numpy image (H x W x C), returns modified image.
 
-    Supports alpha blending and shape {circle, triangle}. Safely clips within bounds.
-    On failure, returns the original image.
+    Supports alpha blending, color {red, blue, green, white}, and shape {circle, triangle, square}.
+    Safely clips within bounds. On failure, returns the original image.
+
+    Args:
+        multi_dots: If True, ignore dot_x/dot_y and draw 3 dots at (10,10), (width-10,10), (10,height-10)
     """
     try:
         from PIL import Image, ImageDraw
@@ -418,26 +454,54 @@ def add_red_dot_to_numpy_image(image_np: np.ndarray, dot_x: int, dot_y: int, dot
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
 
-        # Clip to image bounds
-        x = int(max(0, min(base.width - 1, dot_x)))
-        y = int(max(0, min(base.height - 1, dot_y)))
+        # Color mapping
+        COLOR_MAP = {
+            "red": (255, 0, 0),
+            "blue": (0, 0, 255),
+            "green": (0, 255, 0),
+            "white": (255, 255, 255),
+        }
+        rgb = COLOR_MAP.get(dot_color.lower(), (255, 0, 0))
         r = int(max(1, dot_radius))
         a = int(max(0, min(255, dot_alpha)))
-        fill = (255, 0, 0, a)
+        fill = (*rgb, a)
 
-        if dot_shape == "triangle":
-            points = [
-                (x, y - r),
-                (x - r, y + r),
-                (x + r, y + r),
+        # Determine positions: multi-dots or single dot
+        if multi_dots:
+            # tridots: top-left, top-right, bottom-left triangle distribution
+            positions = [
+                (10, 10),
+                (base.width - 10, 10),
+                (10, base.height - 10)
             ]
-            draw.polygon(points, fill=fill)
         else:
-            left = max(x - r, 0)
-            top = max(y - r, 0)
-            right = min(x + r, base.width - 1)
-            bottom = min(y + r, base.height - 1)
-            draw.ellipse([left, top, right, bottom], fill=fill)
+            positions = [(dot_x, dot_y)]
+
+        # Draw at each position
+        for px, py in positions:
+            # Clip to image bounds
+            x = int(max(0, min(base.width - 1, px)))
+            y = int(max(0, min(base.height - 1, py)))
+
+            if dot_shape == "triangle":
+                points = [
+                    (x, y - r),
+                    (x - r, y + r),
+                    (x + r, y + r),
+                ]
+                draw.polygon(points, fill=fill)
+            elif dot_shape == "square":
+                left = max(x - r, 0)
+                top = max(y - r, 0)
+                right = min(x + r, base.width - 1)
+                bottom = min(y + r, base.height - 1)
+                draw.rectangle([left, top, right, bottom], fill=fill)
+            else:  # circle (default)
+                left = max(x - r, 0)
+                top = max(y - r, 0)
+                right = min(x + r, base.width - 1)
+                bottom = min(y + r, base.height - 1)
+                draw.ellipse([left, top, right, bottom], fill=fill)
 
         composed = Image.alpha_composite(base, overlay)
         # Convert back to original mode if it wasn't RGBA
@@ -520,6 +584,8 @@ def prepare_observation(cfg: GenerateConfig, obs, resize_size, backdoor_active: 
             cfg.visual_backdoor_dot_radius,
             cfg.visual_backdoor_dot_alpha,
             cfg.visual_backdoor_dot_shape,
+            cfg.visual_backdoor_dot_color,
+            cfg.visual_backdoor_multi_dots,
         )
         wrist_img = add_red_dot_to_numpy_image(
             wrist_img,
@@ -528,6 +594,8 @@ def prepare_observation(cfg: GenerateConfig, obs, resize_size, backdoor_active: 
             cfg.visual_backdoor_dot_radius,
             cfg.visual_backdoor_dot_alpha,
             cfg.visual_backdoor_dot_shape,
+            cfg.visual_backdoor_dot_color,
+            cfg.visual_backdoor_multi_dots,
         )
 
     # Optionally cover the bottom quarter of the wrist image with red to hide gripper state

@@ -15,7 +15,7 @@ set -euo pipefail
 # ---------- Project paths ----------
 ROOT="${ROOT:-$HOME/storage/DropVLA_Opt}"
 DATA_DIR="${DATA_DIR:-$ROOT/datasets/openvla}"
-RUN_DIR="${RUN_DIR:-$ROOT/RUN}"
+RUN_DIR="/home/weicong_chen/storage/DropVLA_Opt/RUN"
 LIBERO_PATH="${LIBERO_PATH:-$ROOT/LIBERO}"
 
 # ---------- Experiment parameters ----------
@@ -98,7 +98,7 @@ for value_name in SEED MAX_STEPS DECAY_STEP BATCH_SIZE GRAD_ACCUM_STEPS LORA_RAN
     fi
 done
 
-BASE_MODEL="$RUN_DIR/openvla-7b"
+BASE_MODEL="/home/weicong_chen/storage/DropVLA_Opt/RUN/openvla-7b"
 DATASET_PATH="$DATA_DIR/modified_libero_rlds/$DATASET_NAME/1.0.0"
 TRAIN_FILE="$ROOT/$TRAIN_ENTRY"
 
@@ -131,6 +131,48 @@ fi
 cd "$ROOT"
 
 python -m py_compile "$TRAIN_ENTRY"
+
+# ---------- Record Command to Log File ----------
+cat > "$LOG_FILE" <<CMDEOF
+============================================================
+    Training Command Record (for reproducibility)
+============================================================
+Start time: $(date '+%Y-%m-%d %H:%M:%S')
+Script: $0
+Working directory: $(pwd)
+
+Environment variables used:
+  POISON_RATE=${POISON_RATE}
+  GPU_ID=${GPU_ID}
+  SEED=${SEED}
+  MAX_STEPS=${MAX_STEPS}
+  DECAY_STEP=${DECAY_STEP}
+  BATCH_SIZE=${BATCH_SIZE}
+  GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS}
+  LEARNING_RATE=${LEARNING_RATE}
+  LORA_RANK=${LORA_RANK}
+  LORA_DROPOUT=${LORA_DROPOUT}
+  IMAGE_AUG=${IMAGE_AUG}
+  POISON_TRIGGER_TEXT='${POISON_TRIGGER_TEXT}'
+  POISON_GRIPPER_LOSS_WEIGHT=${POISON_GRIPPER_LOSS_WEIGHT}
+  CONSOLE_LOG_FREQ=${CONSOLE_LOG_FREQ}
+  RUN_NOTE='${RUN_NOTE}'
+
+Equivalent command to reproduce this training:
+  POISON_RATE=${POISON_RATE} GPU_ID=${GPU_ID} SEED=${SEED} \\
+    MAX_STEPS=${MAX_STEPS} LEARNING_RATE=${LEARNING_RATE} \\
+    RUN_NOTE='${RUN_NOTE}' \\
+    bash scripts/train_dropvla.sh
+
+Derived variables:
+  DATASET_NAME=${DATASET_NAME}
+  BASE_MODEL=${BASE_MODEL}
+  RUN_DIR=${RUN_DIR}
+  LOG_FILE=${LOG_FILE}
+
+============================================================
+
+CMDEOF
 
 # ---------- Summary ----------
 cat <<EOF
@@ -174,7 +216,7 @@ exec torchrun \
   --vla_path "$BASE_MODEL" \
   --data_root_dir "$DATA_DIR/modified_libero_rlds" \
   --dataset_name "$DATASET_NAME" \
-  --run_root_dir "$RUN_DIR" \
+  --run_root_dir "/home/weicong_chen/storage/DropVLA_Opt/RUN" \
   --use_l1_regression True \
   --use_diffusion False \
   --use_film False \

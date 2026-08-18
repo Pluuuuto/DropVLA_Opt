@@ -254,3 +254,11 @@ core.*
 # Agent/editor local state
 .claude/
 
+# Archive directory
+.archive/
+
+# Temporary evaluation logs
+logs/trigger_eval_*
+logs/rerun_*
+logs/*_failed_*.txt
+

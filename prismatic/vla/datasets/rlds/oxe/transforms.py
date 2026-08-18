@@ -921,6 +921,9 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "droid_wipe": droid_finetuning_transform,
     ### LIBERO datasets (modified versions)
     "libero_spatial_no_noops": libero_dataset_transform,
+    "sharpd7e8f_poisoned": libero_dataset_transform,
+    "sharpd7e14f_progressive": libero_dataset_transform,
+    "sharpprog7e14f_poisoned": libero_dataset_transform,
     "libero_object_no_noops": libero_dataset_transform,
     "libero_goal_no_noops": libero_dataset_transform,
     "libero_10_no_noops": libero_dataset_transform,
