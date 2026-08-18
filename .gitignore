@@ -262,3 +262,52 @@ logs/trigger_eval_*
 logs/rerun_*
 logs/*_failed_*.txt
 
+# ---------------------------------------------------------------------------
+# Temporary/experimental scripts and documents (not for version control)
+# ---------------------------------------------------------------------------
+
+# Backup files
+*.backup
+*.backup_*
+scripts/.backup*/
+scripts/.archive*/
+
+# Temporary experimental scripts (prefix with _ for local-only)
+scripts/_*
+scripts/auto_eval_*
+scripts/batch_*
+scripts/monitor_*
+scripts/parallel_*
+scripts/quick_*
+scripts/rerun_*
+scripts/run_trigger_*
+scripts/simple_*
+scripts/verify_*
+scripts/extract_*
+scripts/visualize_*
+scripts/standard/
+
+# Temporary experimental variants of main script
+visual_backdoor_attack_*.py
+visual_backdoor_progressive_*.py
+visual_backdoor_trigger_*.py
+
+# Temporary status/progress documents in docs/
+docs/*_STATUS_*.md
+docs/*_SUMMARY_*.md
+docs/*_PROGRESS_*.md
+docs/*_ISSUE_*.md
+docs/*_FIX_*.md
+docs/*_ANALYSIS_*.md
+docs/*_DESIGN_*.md
+docs/*_GUIDE_*.md
+docs/*_COMPLETE_*.md
+docs/*_FINAL*.md
+docs/*_CLEANUP_*.md
+docs/*_REALTIME*.md
+docs/*_IMPLEMENTATION_*.md
+docs/*_VERIFICATION_*.md
+docs/sharps25_*
+docs/status_*
+docs/trigger_variants_*
+
